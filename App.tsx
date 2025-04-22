@@ -8,13 +8,14 @@ import {
   TextInput,
   TouchableOpacity,
   ActivityIndicator,
-  ScrollView,
+  FlatList,
   Alert,
   KeyboardAvoidingView,
   Platform,
-  FlatList,
+  ScrollView,
 } from 'react-native';
 import {Picker} from '@react-native-picker/picker';
+import LinearGradient from 'react-native-linear-gradient'; // Install this library if not already installed
 import {BankData} from './types';
 
 // First update the ValidationResult type to handle both single and multiple accounts
@@ -765,177 +766,161 @@ export default function App(): JSX.Element {
       style={{flex: 1}}
       behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
       keyboardVerticalOffset={Platform.OS === 'ios' ? 64 : 0}>
-      <SafeAreaView style={styles.container}>
-        <View style={styles.mainContent}>
-          <View style={styles.header}>
-            <Text style={styles.title}>Account Validator</Text>
-          </View>
+      <LinearGradient
+        colors={['#f3e5f5', '#e1bee7']}
+        style={styles.gradientBackground}>
+        <SafeAreaView style={styles.container}>
+          <ScrollView
+            style={styles.mainScroll}
+            contentContainerStyle={styles.scrollContent}
+            keyboardShouldPersistTaps="handled">
+            <View style={styles.header}>
+              <Text style={styles.title}>Account Validator</Text>
+              <Text style={styles.subtitle}>
+                Verify account details instantly
+              </Text>
+            </View>
 
-          <View style={styles.form}>
-            <Text style={styles.label}>Account Number</Text>
-            <TextInput
-              style={styles.input}
-              value={accountNumber}
-              onChangeText={validateAccountNumber}
-              placeholder="Enter account number (e.g., 903***7364)"
-              keyboardType="default"
-              maxLength={10}
-            />
-
-            <Text style={styles.label}>Account Holder Name</Text>
-            <TextInput
-              style={styles.input}
-              value={name}
-              onChangeText={setName}
-              placeholder="Enter account holder name"
-            />
-
-            <Text style={styles.label}>Select Bank</Text>
-            <View style={styles.pickerContainer}>
+            <View style={styles.formCard}>
+              <Text style={styles.label}>
+                Account Number <Text style={styles.required}>*</Text>
+              </Text>
               <TextInput
-                style={styles.searchInput}
-                value={bankSearch}
-                onChangeText={setBankSearch}
-                placeholder="Search banks..."
-                clearButtonMode="while-editing"
+                style={styles.input}
+                value={accountNumber}
+                onChangeText={validateAccountNumber}
+                placeholder="Enter account number (e.g., 903***7364)"
+                keyboardType="default"
+                maxLength={10}
               />
-              {selectedBank && (
-                <Picker
-                  selectedValue={selectedBank}
-                  onValueChange={(itemValue: string) =>
-                    setSelectedBank(itemValue)
-                  }
-                  style={styles.picker}>
-                  {(Object.entries(banks) as [string, string][])
-                    .filter(([_bankCode, bankName]: [string, string]) =>
-                      bankName.toLowerCase().includes(bankSearch.toLowerCase()),
-                    )
-                    .map(([bankCode, bankName]: [string, string]) => (
-                      <Picker.Item
-                        key={bankCode}
-                        label={bankName}
-                        value={bankCode}
-                      />
-                    ))}
-                </Picker>
-              )}
+
+              <Text style={styles.label}>Account Holder Name</Text>
+              <TextInput
+                style={styles.input}
+                value={name}
+                onChangeText={setName}
+                placeholder="Enter account holder name"
+              />
+
+              <Text style={styles.label}>
+                Select Bank <Text style={styles.required}>*</Text>
+              </Text>
+              <View style={styles.pickerContainer}>
+                <TextInput
+                  style={styles.searchInput}
+                  value={bankSearch}
+                  onChangeText={setBankSearch}
+                  placeholder="Search banks..."
+                  clearButtonMode="while-editing"
+                />
+                {selectedBank && (
+                  <Picker
+                    selectedValue={selectedBank}
+                    onValueChange={(itemValue: string) =>
+                      setSelectedBank(itemValue)
+                    }
+                    style={styles.picker}>
+                    {(Object.entries(banks) as [string, string][])
+                      .filter(([_bankCode, bankName]: [string, string]) =>
+                        bankName
+                          .toLowerCase()
+                          .includes(bankSearch.toLowerCase()),
+                      )
+                      .map(([bankCode, bankName]: [string, string]) => (
+                        <Picker.Item
+                          key={bankCode}
+                          label={bankName}
+                          value={bankCode}
+                        />
+                      ))}
+                  </Picker>
+                )}
+              </View>
+
+              <TouchableOpacity
+                style={[styles.button, loading && styles.buttonDisabled]}
+                onPress={handleSubmit}
+                disabled={loading}>
+                {loading ? (
+                  <ActivityIndicator color="#fff" />
+                ) : (
+                  <Text style={styles.buttonText}>Validate Account</Text>
+                )}
+              </TouchableOpacity>
             </View>
 
-            <TouchableOpacity
-              style={[styles.button, loading && styles.buttonDisabled]}
-              onPress={handleSubmit}
-              disabled={loading}>
-              {loading ? (
-                <ActivityIndicator color="#fff" />
-              ) : (
-                <Text style={styles.buttonText}>Validate Account</Text>
-              )}
-            </TouchableOpacity>
-          </View>
-
-          {error && (
-            <View style={styles.messageCard}>
-              <Text style={styles.errorText}>{error}</Text>
-            </View>
-          )}
-
-          {result && (
-            <View style={styles.resultsWrapper}>
-              <Text style={styles.resultTitle}>Results</Text>
-              {!result.isValid ? (
-                <View style={styles.messageCard}>
-                  <Text style={styles.errorText}>
-                    {result.message || 'No matching account found'}
-                  </Text>
-                </View>
-              ) : (
-                <>
-                  {result.accounts ? (
-                    // Search results with multiple accounts
-                    <>
-                      <Text style={styles.resultCount}>
-                        Found {result.accounts.length} matching accounts:
-                      </Text>
-                      <FlatList
-                        data={result.accounts}
-                        keyExtractor={(_, index) => `account-${index}`}
-                        renderItem={({item: account}) => (
-                          <View style={styles.accountCard}>
-                            <View style={styles.resultRow}>
-                              <Text style={styles.resultLabel}>Account:</Text>
-                              <Text style={styles.resultValue}>
-                                {account.account_number}
-                              </Text>
-                            </View>
-                            <View style={styles.resultRow}>
-                              <Text style={styles.resultLabel}>Name:</Text>
-                              <Text style={styles.resultValue}>
-                                {account.account_name}
-                              </Text>
-                            </View>
-                            {(account.first_name || account.last_name) && (
+            {result && (
+              <View style={styles.resultsCard}>
+                <Text style={styles.resultTitle}>Results</Text>
+                {!result.isValid ? (
+                  <View style={styles.messageCard}>
+                    <Text style={styles.errorText}>
+                      {result.message || 'No matching account found'}
+                    </Text>
+                  </View>
+                ) : (
+                  <>
+                    {result.accounts ? (
+                      <View style={styles.resultsSection}>
+                        <Text style={styles.resultCount}>
+                          Found {result.accounts.length} matching accounts:
+                        </Text>
+                        <View style={styles.accountsList}>
+                          {result.accounts.map((account, index) => (
+                            <View
+                              key={`account-${index}`}
+                              style={styles.accountCard}>
                               <View style={styles.resultRow}>
-                                <Text style={styles.resultLabel}>
-                                  Full Name:
-                                </Text>
+                                <Text style={styles.resultLabel}>Account:</Text>
                                 <Text style={styles.resultValue}>
-                                  {`${account.first_name || ''} ${
-                                    account.other_name || ''
-                                  } ${account.last_name || ''}`.trim()}
+                                  {account.account_number}
                                 </Text>
                               </View>
-                            )}
-                            <View style={styles.resultRow}>
-                              <Text style={styles.resultLabel}>Bank:</Text>
-                              <Text style={styles.resultValue}>
-                                {account.bank_name}
-                              </Text>
+                              <View style={styles.resultRow}>
+                                <Text style={styles.resultLabel}>Name:</Text>
+                                <Text style={styles.resultValue}>
+                                  {account.account_name}
+                                </Text>
+                              </View>
+                              <View style={styles.resultRow}>
+                                <Text style={styles.resultLabel}>Bank:</Text>
+                                <Text style={styles.resultValue}>
+                                  {account.bank_name}
+                                </Text>
+                              </View>
                             </View>
-                          </View>
-                        )}
-                        style={styles.resultsList}
-                        contentContainerStyle={styles.resultsContent}
-                      />
-                    </>
-                  ) : (
-                    // Single account validation result
-                    <View style={styles.accountCard}>
-                      <View style={styles.resultRow}>
-                        <Text style={styles.resultLabel}>Account:</Text>
-                        <Text style={styles.resultValue}>
-                          {result.account_number}
-                        </Text>
+                          ))}
+                        </View>
                       </View>
-                      <View style={styles.resultRow}>
-                        <Text style={styles.resultLabel}>Name:</Text>
-                        <Text style={styles.resultValue}>
-                          {result.account_name}
-                        </Text>
-                      </View>
-                      {(result.first_name || result.last_name) && (
+                    ) : (
+                      <View style={styles.accountCard}>
                         <View style={styles.resultRow}>
-                          <Text style={styles.resultLabel}>Full Name:</Text>
+                          <Text style={styles.resultLabel}>Account:</Text>
                           <Text style={styles.resultValue}>
-                            {`${result.first_name || ''} ${
-                              result.other_name || ''
-                            } ${result.last_name || ''}`.trim()}
+                            {result.account_number}
                           </Text>
                         </View>
-                      )}
-                      <View style={styles.resultRow}>
-                        <Text style={styles.resultLabel}>Bank:</Text>
-                        <Text style={styles.resultValue}>
-                          {result.bank_name}
-                        </Text>
+                        <View style={styles.resultRow}>
+                          <Text style={styles.resultLabel}>Name:</Text>
+                          <Text style={styles.resultValue}>
+                            {result.account_name}
+                          </Text>
+                        </View>
+                        <View style={styles.resultRow}>
+                          <Text style={styles.resultLabel}>Bank:</Text>
+                          <Text style={styles.resultValue}>
+                            {result.bank_name}
+                          </Text>
+                        </View>
                       </View>
-                    </View>
-                  )}
-                </>
-              )}
-            </View>
-          )}
-        </View>
-      </SafeAreaView>
+                    )}
+                  </>
+                )}
+              </View>
+            )}
+          </ScrollView>
+        </SafeAreaView>
+      </LinearGradient>
     </KeyboardAvoidingView>
   );
 }
@@ -944,59 +929,60 @@ const styles = StyleSheet.create({
   container: {
     flex: 1,
     backgroundColor: '#f5f5f5',
+    // Add padding top for status bar
+    paddingTop: Platform.OS === 'android' ? 25 : 0,
   },
-  mainContent: {
+  gradientBackground: {
     flex: 1,
-    padding: 16,
-  },
-  keyboardAvoid: {
-    flex: 1,
-  },
-  scrollContent: {
-    flexGrow: 1,
-    padding: 16,
-    paddingBottom: 24,
   },
   header: {
     alignItems: 'center',
     marginBottom: 24,
-    marginTop: 10,
+    marginTop: 16, // Add top margin to header
   },
   title: {
-    fontSize: 24,
+    fontSize: 28,
     fontWeight: 'bold',
-    color: '#333',
+    color: '#6a1b9a',
   },
-  form: {
+  subtitle: {
+    fontSize: 16,
+    color: '#9c27b0',
+    marginTop: 4,
+  },
+  formCard: {
     backgroundColor: '#fff',
-    borderRadius: 8,
-    padding: 16,
-    marginBottom: 16,
+    borderRadius: 12,
+    padding: 20,
+    marginHorizontal: 16,
     shadowColor: '#000',
-    shadowOffset: {width: 0, height: 2},
+    shadowOffset: {width: 0, height: 4},
     shadowOpacity: 0.1,
-    shadowRadius: 4,
-    elevation: 2,
+    shadowRadius: 6,
+    elevation: 3,
   },
   label: {
     fontSize: 16,
-    marginBottom: 4,
+    marginBottom: 8,
     color: '#333',
     fontWeight: '500',
+  },
+  required: {
+    color: '#d32f2f',
   },
   input: {
     height: 48,
     borderWidth: 1,
     borderColor: '#ddd',
-    borderRadius: 4,
+    borderRadius: 8,
     marginBottom: 16,
-    paddingHorizontal: 10,
+    paddingHorizontal: 12,
     backgroundColor: '#fafafa',
   },
   pickerContainer: {
     borderWidth: 1,
     borderColor: '#ddd',
-    borderRadius: 4,
+    borderRadius: 8,
     marginBottom: 16,
     backgroundColor: '#fafafa',
   },
@@ -1011,9 +997,9 @@ const styles = StyleSheet.create({
     marginBottom: 8,
   },
   button: {
-    backgroundColor: '#007BFF',
+    backgroundColor: '#7b1fa2',
     height: 48,
-    borderRadius: 4,
+    borderRadius: 8,
     justifyContent: 'center',
     alignItems: 'center',
   },
@@ -1025,53 +1011,29 @@ const styles = StyleSheet.create({
     fontSize: 16,
     fontWeight: '600',
   },
-  resultContainer: {
+  resultsCard: {
     backgroundColor: '#fff',
-    borderRadius: 8,
-    padding: 16,
+    borderRadius: 12,
+    padding: 20,
     marginHorizontal: 16,
+    marginTop: 16,
     marginBottom: 16,
     shadowColor: '#000',
-    shadowOffset: {width: 0, height: 2},
+    shadowOffset: {width: 0, height: 4},
     shadowOpacity: 0.1,
-    shadowRadius: 4,
-    elevation: 2,
-    maxHeight: '50%',
+    shadowRadius: 6,
+    elevation: 3,
   },
   resultTitle: {
     fontSize: 20,
     fontWeight: 'bold',
-    color: '#333',
+    color: '#6a1b9a',
     marginBottom: 16,
-    marginHorizontal: 16,
   },
   resultCount: {
     fontSize: 16,
-    color: '#666',
+    color: '#333',
     marginBottom: 12,
-    marginHorizontal: 16,
-  },
-  resultsWrapper: {
-    flex: 1,
-    backgroundColor: '#fff',
-    borderRadius: 8,
-    padding: 16,
-    marginTop: 16,
-    shadowColor: '#000',
-    shadowOffset: {width: 0, height: 2},
-    shadowOpacity: 0.1,
-    shadowRadius: 4,
-    elevation: 2,
-  },
-  resultsSection: {
-    flex: 1,
-    minHeight: 200,
-  },
-  resultsList: {
-    flex: 1,
-  },
-  resultsContent: {
-    paddingBottom: 16,
   },
   accountCard: {
     backgroundColor: '#f8f9fa',
@@ -1092,8 +1054,8 @@ const styles = StyleSheet.create({
   },
   resultValue: {
     fontSize: 16,
-    color: '#333',
-    fontWeight: '500',
+    color: '#6a1b9a',
+    fontWeight: '600',
     flex: 1,
   },
   errorText: {
@@ -1116,12 +1078,13 @@ const styles = StyleSheet.create({
     fontSize: 16,
     color: '#007BFF',
   },
-  accountsList: {
-    flex: 1, // Add this
+  resultsList: {
+    flexGrow: 1,
+    height: '100%',
   },
-  resultsScrollView: {
-    flexGrow: 0, // Add this
-    maxHeight: 300, // Adjust this value as needed
+  resultsContent: {
+    flexGrow: 1,
+    paddingBottom: 16,
   },
   messageCard: {
     backgroundColor: '#fff',
@@ -1135,10 +1098,20 @@ const styles = StyleSheet.create({
     shadowRadius: 4,
     elevation: 2,
   },
-  resultsContainer: {
-    padding: 16,
+  resultsSection: {
+    flex: 1,
+    minHeight: 100,
   },
   mainScroll: {
     flex: 1,
+    paddingTop: 8, // Add padding to scroll view
+  },
+  scrollContent: {
+    flexGrow: 1,
+    paddingBottom: 24,
+    paddingTop: 8, // Add padding to content
+  },
+  accountsList: {
+    paddingTop: 8,
   },
 });
