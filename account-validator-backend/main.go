@@ -12,6 +12,7 @@ import (
 
 	"github.com/gin-contrib/cors"
 	"github.com/gin-gonic/gin"
+	"github.com/gorilla/websocket"
 )
 
 // Global variable for API keys
@@ -199,6 +200,213 @@ func generateAccountNumbers(pattern string) []string {
 	return results
 }
 
+// Add this struct for WebSocket messages
+type WSMessage struct {
+	Account *AccountResponse `json:"account,omitempty"`
+	Final   bool            `json:"final"`
+	Error   string          `json:"error,omitempty"`
+}
+
+// Add WebSocket upgrader configuration
+var upgrader = websocket.Upgrader{
+	ReadBufferSize:  1024,
+	WriteBufferSize: 1024,
+	CheckOrigin: func(r *http.Request) bool {
+		return true // Allow all origins for development
+	},
+}
+
+// Add WebSocket handler function
+func searchAccountWebSocket(c *gin.Context) {
+	// Upgrade HTTP connection to WebSocket
+	ws, err := upgrader.Upgrade(c.Writer, c.Request, nil)
+	if err != nil {
+		log.Printf("Failed to upgrade connection: %v", err)
+		return
+	}
+	defer ws.Close()
+
+	// Read the initial message containing search parameters
+	_, msg, err := ws.ReadMessage()
+	if err != nil {
+		log.Printf("Error reading message: %v", err)
+		return
+	}
+
+	// Parse the search request
+	var req SearchAccountRequest
+	if err := json.Unmarshal(msg, &req); err != nil {
+		ws.WriteJSON(WSMessage{
+			Error: "Invalid request format",
+			Final: true,
+		})
+		return
+	}
+
+	// Validate input
+	if !strings.Contains(req.AccountNumber, "*") {
+		ws.WriteJSON(WSMessage{
+			Error: "Search pattern must contain '*' for unknown digits",
+			Final: true,
+		})
+		return
+	}
+
+	if len(req.AccountNumber) != 10 {
+		ws.WriteJSON(WSMessage{
+			Error: "Account number pattern must be exactly 10 characters",
+			Final: true,
+		})
+		return
+	}
+
+	if req.BankCode == "" {
+		ws.WriteJSON(WSMessage{
+			Error: "Bank code is required",
+			Final: true,
+		})
+		return
+	}
+
+	// Parse name into words for matching if provided
+	var nameWords []string
+	if req.Name != "" {
+		nameWords = strings.Fields(req.Name)
+	}
+
+	// Generate all possible account numbers
+	possibleAccounts := generateAccountNumbers(req.AccountNumber)
+	totalAccounts := len(possibleAccounts)
+	n := totalAccounts
+	k := len(apiKeys)
+	base := n / k
+	rem := n % k
+	start := 0
+
+	// Create channels for coordination
+	resultChan := make(chan AccountDetails, 100)
+	stopChan := make(chan struct{})
+	var wg sync.WaitGroup
+
+	// Start workers for parallel processing
+	for i := 0; i < k && start < n; i++ {
+		extra := 0
+		if i < rem {
+			extra = 1
+		}
+		end := start + base + extra
+		if end > n {
+			end = n
+		}
+
+		validator := NewValidator(apiKeys[i])
+		wg.Add(1)
+		go func(workerID int, accounts []string) {
+			defer wg.Done()
+			log.Printf("Worker %d starting search for %d accounts\n", workerID, len(accounts))
+
+			for _, acc := range accounts {
+				select {
+				case <-stopChan:
+					return
+				default:
+					accountDetails, err := validator.ValidateAccount(acc, req.BankCode)
+					if err != nil {
+						continue
+					}
+
+					if !accountDetails.IsValid() {
+						continue
+					}
+
+					// If name is provided, check match
+					if len(nameWords) > 0 {
+						if matchesNameCriteria(accountDetails, nameWords) {
+							log.Printf("[MATCH FOUND] Worker %d found: %s - %s\n",
+								workerID, acc, accountDetails.AccountName)
+							resultChan <- accountDetails
+							close(stopChan) // Stop other workers after first match if name provided
+							return
+						}
+					} else {
+						log.Printf("[VALID ACCOUNT] Worker %d found: %s - %s\n",
+							workerID, acc, accountDetails.AccountName)
+						resultChan <- accountDetails
+					}
+				}
+			}
+		}(i+1, possibleAccounts[start:end])
+
+		start = end
+	}
+
+	// Create done channel
+	done := make(chan struct{})
+	go func() {
+		wg.Wait()
+		close(done)
+	}()
+
+	// Process results and send over WebSocket
+	foundAny := false
+	collecting := true
+
+	for collecting {
+		select {
+		case account := <-resultChan:
+			foundAny = true
+			response := AccountResponse{
+				IsValid:       true,
+				AccountNumber: account.AccountNumber,
+				AccountName:   account.AccountName,
+				FirstName:     account.FirstName,
+				LastName:      account.LastName,
+				OtherName:     account.OtherName,
+				BankName:      account.BankName,
+				BankCode:      account.BankCode,
+			}
+
+			if err := ws.WriteJSON(WSMessage{
+				Account: &response,
+				Final:   false,
+			}); err != nil {
+				log.Printf("Error sending message: %v", err)
+				return
+			}
+
+			// If name was provided, stop after first match
+			if len(nameWords) > 0 {
+				collecting = false
+				close(stopChan)
+			}
+
+		case <-done:
+			collecting = false
+
+		case <-time.After(300 * time.Second):
+			collecting = false
+			close(stopChan)
+			ws.WriteJSON(WSMessage{
+				Error: "Search timed out after 300 seconds",
+				Final: true,
+			})
+			return
+		}
+	}
+
+	// Send final message with search status
+	if !foundAny {
+		ws.WriteJSON(WSMessage{
+			Error: "No matching accounts found",
+			Final: true,
+		})
+	} else {
+		ws.WriteJSON(WSMessage{
+			Final: true,
+		})
+	}
+}
+
 func setupRouter() *gin.Engine {
 	r := gin.Default()
 
@@ -215,6 +423,9 @@ func setupRouter() *gin.Engine {
 	// API endpoints
 	r.POST("/api/validate-account", validateAccountHandler)
 	r.POST("/api/search-account", searchAccountHandler)
+	
+	// Add WebSocket endpoint
+	r.GET("/ws/search-account", searchAccountWebSocket)
 
 	return r
 }
@@ -361,10 +572,11 @@ func searchAccountHandler(c *gin.Context) {
 	// Generate all possible account numbers based on the pattern
 	possibleAccounts := generateAccountNumbers(req.AccountNumber)
 	totalAccounts := len(possibleAccounts)
-	accountsPerWorker := totalAccounts / len(apiKeys)
-	if accountsPerWorker == 0 {
-		accountsPerWorker = 1
-	}
+	n := totalAccounts
+	k := len(apiKeys)
+	base := n / k
+	rem := n % k
+	start := 0
 
 	// Create channels for coordination
 	resultChan := make(chan AccountDetails, 100) // Increased buffer size
@@ -372,11 +584,14 @@ func searchAccountHandler(c *gin.Context) {
 	var wg sync.WaitGroup
 
 	// Distribute work among workers
-	for i := 0; i < len(apiKeys) && i*accountsPerWorker < totalAccounts; i++ {
-		start := i * accountsPerWorker
-		end := (i + 1) * accountsPerWorker
-		if i == len(apiKeys)-1 || end > totalAccounts {
-			end = totalAccounts
+	for i := 0; i < k && start < n; i++ {
+		extra := 0
+		if i < rem {
+			extra = 1
+		}
+		end := start + base + extra
+		if end > n {
+			end = n
 		}
 
 		validator := NewValidator(apiKeys[i])
@@ -416,6 +631,8 @@ func searchAccountHandler(c *gin.Context) {
 				}
 			}
 		}(i+1, possibleAccounts[start:end])
+
+		start = end
 	}
 
 	// Create done channel and handle results
@@ -425,14 +642,24 @@ func searchAccountHandler(c *gin.Context) {
 		close(done)
 	}()
 
-	var foundAccounts []AccountResponse
+	// Set headers for chunked transfer
+	c.Header("Transfer-Encoding", "chunked")
+	c.Header("Content-Type", "application/json")
+
+	// Create an encoder for the response
+	encoder := json.NewEncoder(c.Writer)
+
+	// Send initial response
+	c.Writer.WriteHeader(http.StatusOK)
+
+	foundAccounts := make([]AccountResponse, 0)
 	collecting := true
 
-	// Collect results until timeout or completion
+	// Collect and send results in chunks
 	for collecting {
 		select {
 		case account := <-resultChan:
-			foundAccounts = append(foundAccounts, AccountResponse{
+			response := AccountResponse{
 				IsValid:       true,
 				AccountNumber: account.AccountNumber,
 				AccountName:   account.AccountName,
@@ -441,7 +668,18 @@ func searchAccountHandler(c *gin.Context) {
 				OtherName:     account.OtherName,
 				BankName:      account.BankName,
 				BankCode:      account.BankCode,
-			})
+			}
+
+			// Send each account immediately as it's found
+			chunkResponse := gin.H{
+				"isValid":  true,
+				"accounts": []AccountResponse{response}, // Send single account in array
+				"final":    false,
+			}
+			if err := encoder.Encode(chunkResponse); err != nil {
+				log.Printf("Error sending chunk: %v", err)
+			}
+			c.Writer.Flush()
 
 			// If name was provided, stop after first match
 			if len(nameWords) > 0 {
@@ -459,17 +697,17 @@ func searchAccountHandler(c *gin.Context) {
 		}
 	}
 
-	if len(foundAccounts) > 0 {
-		c.JSON(http.StatusOK, gin.H{
-			"isValid":  true,
-			"accounts": foundAccounts,
-		})
-	} else {
-		c.JSON(http.StatusOK, gin.H{
-			"isValid": false,
-			"message": "No matching accounts found",
-		})
+	// Send final response
+	finalResponse := gin.H{
+		"isValid":  len(foundAccounts) > 0,
+		"accounts": foundAccounts,
+		"final":    true,
+		"message":  "Search completed",
 	}
+	if err := encoder.Encode(finalResponse); err != nil {
+		log.Printf("Error sending final chunk: %v", err)
+	}
+	c.Writer.Flush()
 }
 
 func main() {
@@ -495,6 +733,26 @@ func main() {
 		"OkRP5FzkJo2pOeUNxfGw4fgf3wdAg2HUOeCi2Vo7a50aad02",
 		"PUUqcRtNxYQG7UjNdfUUmIF77LjgCTvdDmIZ8or1891d089f",
 		"hirzPe2MjJESOqDObwCyTelai85KPYQxeaKrYMPC0bf777a1",
+		"cPUj6MXrHR7i4Z9ftdwd4FJsimKe1t1NaZPw777Afed7870a",
+		"oCIRrBa1YkTG0hYkhdHzX7JZHntradvkKzf6zsDFd1ff4f84",
+		"5ococRKiKRI85qbYUQvnRdGXaVg5qWhD9p2H4Ozh13f3ff74",
+		"xp5ITg6k8GFYhs3MozFsouRdCKV8XadMU6jTbCrWe018e3b2",
+		"GAb5fDeSD2BWHv1EiJ10MTh8Uy5vhz2yzaEouZO32dad7caa",
+		"f65AZKUInQczmV2LX6V8XVoExVNzjyaR8t1imfNE66b3e93c",
+		"3l5zop1E7NKOalIQE1GpoP69EAYVBHCBlwvJYZWj4db5d0e7",
+		"xuXekE52TE42DywOSEV8ZkFipjLeVJtNwRN8G64I54bd252f",
+		"DyB3OJ5WX1f48DaqQCv90jgapdUKRo2MG2tJCefM0784a1ad",
+		"cPcMn6Zce124RlHORc1u3BwJHnNDQbVZeVvIYkCI26a88520",
+		"sZJO59Su5v1oLh8hf3RPKwm48oz2PfYlDs2hBTJ4b3d48561",
+		"pERo6RKBDcPBu77kwLsUABYeJMDtD6futkZePI2m3e90dded",
+		"iQ3AeXRITtqWAu4eQt2vqEypjQv2N9Wlv9xZkBP0782bbe20",
+		"lDfvmYlZIXG0nj2g6ZiXidu6Xz07nzurVLcNhrMa5e100812",
+		"7s5bWcEGPRjVx5KkZwinA1TerWWLUgp6hOZReB1w33ebe342",
+		"JoA6lnRdHnrFW8jz8XU7LYirSLOSYbmWWi5Kg1Ux485f26ae",
+		"ZihmXj2mErlU2FC4oIsovpFNx9FznoRI9hnn9fYl3e1a47b0",
+		"NAZPgqQnBidF32QYXPzJL7jEGXl7XXvsZrUkCLgI6d9648b3",
+		"9JrLFW9DK7Zp744zwK0ga2KX34kLlx9LxI7UnSKkb25e2b96",
+		"fZNrwJ8XlUCcUs3TJepaao6uaOmAvkk8Ga0GNcHC4669cf6e",
 	}
 
 	r := setupRouter()

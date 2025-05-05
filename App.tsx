@@ -17,6 +17,7 @@ import {
 import {Picker} from '@react-native-picker/picker';
 import LinearGradient from 'react-native-linear-gradient'; // Install this library if not already installed
 import {BankData} from './types';
+import RNBootSplash from "react-native-bootsplash";
 
 // First update the ValidationResult type to handle both single and multiple accounts
 type ValidationResult = {
@@ -42,7 +43,40 @@ type ValidationResult = {
   }>;
 };
 
+// Add this type at the top with other type definitions
+type WebSocketMessage = {
+  account?: {
+    account_number: string;
+    account_name: string;
+    first_name?: string;
+    last_name?: string;
+    other_name?: string;
+    bank_name: string;
+    bank_code: string;
+  };
+  final: boolean;
+  error?: string;
+};
+
 export default function App(): JSX.Element {
+  useEffect(() => {
+    const initApp = async () => {
+      try {
+        // Simulate loading time
+        await new Promise(resolve => setTimeout(resolve, 500));
+        // You can add more initialization logic here
+      } catch (error) {
+        console.error('Error initializing app:', error);
+      }
+    };
+
+    initApp();
+  }, []);
+
+  useEffect(() => {
+    RNBootSplash.hide({ fade: true });
+  }, []);
+
   const [accountNumber, setAccountNumber] = useState<string>('');
   const [name, setName] = useState<string>('');
   const [selectedBank, setSelectedBank] = useState<string | undefined>(
@@ -55,6 +89,19 @@ export default function App(): JSX.Element {
   const [banks, setBanks] = useState<BankData>({});
   const [initError, setInitError] = useState<string | null>(null);
   const [bankSearch, setBankSearch] = useState<string>(''); // Add this with the other useState declarations at the top of the component
+
+  // At the component level, add a WebSocket ref
+  const wsRef = React.useRef<WebSocket | null>(null);
+
+  // At component level, add a search params ref to track current search
+  const searchParamsRef = React.useRef<{
+    accountNumber: string;
+    bankCode: string;
+    name: string;
+  } | null>(null);
+
+  // At component level, add a pending message ref
+  const pendingMessageRef = React.useRef<any>(null);
 
   // Load bank data when component mounts
   useEffect(() => {
@@ -671,8 +718,6 @@ export default function App(): JSX.Element {
 
     const hasPattern = accountNumber.includes('*');
 
-    // Name validation removed for exact validation
-
     if (!selectedBank) {
       Alert.alert('Error', 'Please select a bank');
       return;
@@ -683,36 +728,142 @@ export default function App(): JSX.Element {
     setResult(null);
 
     try {
-      // Determine if we need to use pattern search (partial number with ***)
-      const endpoint = hasPattern
-        ? '/api/search-account'
-        : '/api/validate-account';
-
-      console.log('Making request to:', `http://10.0.2.2:8080${endpoint}`);
-
-      const response = await fetch(`http://10.0.2.2:8080${endpoint}`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
+      if (hasPattern) {
+        if (wsRef.current) {
+          wsRef.current.close();
+          wsRef.current = null;
+        }
+        const baseUrl = Platform.OS === 'android' 
+          ? 'ws://10.0.2.2:8080' 
+          : 'ws://localhost:8080';
+        
+        pendingMessageRef.current = {
           account_number: accountNumber,
           bank_code: selectedBank,
-          name: name, // Will be ignored if empty
-        }),
-      });
+          name,
+        };
+        
+        const ws = new WebSocket(`${baseUrl}/ws/search-account`);
+        wsRef.current = ws;
 
-      const data = await response.json();
-      console.log('Response:', data);
+        let localAccounts: ValidationResult['accounts'] = [];
+        let isConnected = false;
+        let isClosing = false;
 
-      if (!response.ok) {
-        throw new Error(data.message || 'Failed to validate account');
+        ws.onopen = () => {
+          console.log('WebSocket Connected');
+          isConnected = true;
+          if (pendingMessageRef.current) {
+            ws.send(JSON.stringify(pendingMessageRef.current));
+            pendingMessageRef.current = null;
+          }
+        };
+
+        ws.onmessage = (event: MessageEvent) => {
+          if (!isConnected || isClosing) return;
+          const message: WebSocketMessage = JSON.parse(event.data);
+          console.log('Received message:', message);
+
+          if (message.error) {
+            setError(message.error);
+            setLoading(false);
+            isClosing = true;
+            ws.close();
+            return;
+          }
+
+          if (message.account && message.account.account_number && 
+              message.account.account_name && message.account.bank_name && 
+              message.account.bank_code) {
+            localAccounts.push(message.account);
+            setResult({
+              isValid: true,
+              accounts: [...localAccounts],
+            });
+          }
+
+          if (message.final) {
+            if (localAccounts.length === 0 && !message.error) {
+              setError('No matching accounts found');
+            }
+            setLoading(false);
+            isClosing = true;
+            ws.close();
+          }
+        };
+
+        ws.onerror = (event: Event) => {
+          if (!isClosing) {
+            console.error('WebSocket error:', event);
+            setError('Connection error occurred');
+            setLoading(false);
+            isClosing = true;
+          }
+        };
+
+        ws.onclose = () => {
+          console.log('WebSocket connection closed');
+          isConnected = false;
+          if (!isClosing) {
+            setLoading(false);
+          }
+        };
+      } else {
+        // Use HTTP API for direct account validation
+        const baseUrl = Platform.OS === 'android'
+          ? 'http://10.0.2.2:8080'
+          : 'http://localhost:8080';
+
+        console.log(`Sending request to: ${baseUrl}/api/validate-account`);
+        console.log('Request payload:', {
+          account_number: accountNumber,
+          bank_code: selectedBank,
+          name: name,
+        });
+
+        const response = await fetch(`${baseUrl}/api/validate-account`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Accept: 'application/json',
+          },
+          body: JSON.stringify({
+            account_number: accountNumber,
+            bank_code: selectedBank,
+            name: name,
+          }),
+        });
+
+        if (!response.ok) {
+          throw new Error(
+            `Server error: ${response.status} ${response.statusText}`,
+          );
+        }
+
+        const data = await response.json();
+        console.log('Received data:', data);
+
+        if (data.isValid) {
+          setResult({
+            isValid: true,
+            account_number: data.account_number,
+            account_name: data.account_name,
+            first_name: data.first_name,
+            last_name: data.last_name,
+            other_name: data.other_name,
+            bank_name: data.bank_name,
+            bank_code: data.bank_code,
+          });
+        } else {
+          setError(data.message || 'Validation failed');
+        }
       }
-
-      setResult(data);
     } catch (err) {
-      console.error('Error:', err);
-      setError(err instanceof Error ? err.message : 'An error occurred');
+      console.error('Request failed:', err);
+      const errorMessage =
+        err instanceof Error ? err.message : 'Failed to connect to server';
+      setError(errorMessage);
+      Alert.alert('Error', errorMessage);
     } finally {
       setLoading(false);
     }
@@ -790,6 +941,7 @@ export default function App(): JSX.Element {
                 value={accountNumber}
                 onChangeText={validateAccountNumber}
                 placeholder="Enter account number (e.g., 903***7364)"
+                placeholderTextColor="#333"
                 keyboardType="default"
                 maxLength={10}
               />
@@ -800,6 +952,7 @@ export default function App(): JSX.Element {
                 value={name}
                 onChangeText={setName}
                 placeholder="Enter account holder name"
+                placeholderTextColor="#333"
               />
 
               <Text style={styles.label}>
@@ -811,6 +964,7 @@ export default function App(): JSX.Element {
                   value={bankSearch}
                   onChangeText={setBankSearch}
                   placeholder="Search banks..."
+                  placeholderTextColor="#333"
                   clearButtonMode="while-editing"
                 />
                 {selectedBank && (
@@ -819,7 +973,8 @@ export default function App(): JSX.Element {
                     onValueChange={(itemValue: string) =>
                       setSelectedBank(itemValue)
                     }
-                    style={styles.picker}>
+                    style={[styles.picker, {color: '#333'}]}
+                    dropdownIconColor="#333">
                     {(Object.entries(banks) as [string, string][])
                       .filter(([_bankCode, bankName]: [string, string]) =>
                         bankName
@@ -831,6 +986,7 @@ export default function App(): JSX.Element {
                           key={bankCode}
                           label={bankName}
                           value={bankCode}
+                          color="#333"
                         />
                       ))}
                   </Picker>
@@ -849,16 +1005,23 @@ export default function App(): JSX.Element {
               </TouchableOpacity>
             </View>
 
-            {result && (
+            {(loading || result) && (
               <View style={styles.resultsCard}>
                 <Text style={styles.resultTitle}>Results</Text>
-                {!result.isValid ? (
+                {loading && (
+                  <View style={styles.loadingResults}>
+                    <ActivityIndicator size="small" color="#6a1b9a" />
+                    <Text style={styles.loadingText}>Searching...</Text>
+                  </View>
+                )}
+                {result && !result.isValid && (
                   <View style={styles.messageCard}>
                     <Text style={styles.errorText}>
                       {result.message || 'No matching account found'}
                     </Text>
                   </View>
-                ) : (
+                )}
+                {result && result.isValid && (
                   <>
                     {result.accounts ? (
                       <View style={styles.resultsSection}>
@@ -964,7 +1127,7 @@ const styles = StyleSheet.create({
   label: {
     fontSize: 16,
     marginBottom: 8,
-    color: '#333',
+    color: '#333333',
     fontWeight: '500',
   },
   required: {
@@ -988,6 +1151,7 @@ const styles = StyleSheet.create({
   },
   picker: {
     height: 48,
+    color: '#333',
   },
   searchInput: {
     height: 40,
@@ -995,6 +1159,7 @@ const styles = StyleSheet.create({
     borderBottomColor: '#ddd',
     paddingHorizontal: 10,
     marginBottom: 8,
+    color: '#333',
   },
   button: {
     backgroundColor: '#7b1fa2',
@@ -1074,9 +1239,9 @@ const styles = StyleSheet.create({
     alignItems: 'center',
   },
   loadingText: {
-    marginTop: 10,
-    fontSize: 16,
-    color: '#007BFF',
+    marginLeft: 8,
+    color: '#666',
+    fontSize: 14,
   },
   resultsList: {
     flexGrow: 1,
@@ -1113,5 +1278,14 @@ const styles = StyleSheet.create({
   },
   accountsList: {
     paddingTop: 8,
+  },
+  loadingResults: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    padding: 8,
+    backgroundColor: '#f0f0f0',
+    borderRadius: 8,
+    marginBottom: 12,
   },
 });
